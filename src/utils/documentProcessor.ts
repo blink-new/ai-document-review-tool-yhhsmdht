@@ -117,20 +117,28 @@ function extractNumericalData(text: string, tables: Array<{ headers: string[]; r
       const value = parseFloat(cleanNumber) * multiplier * (isNegative ? -1 : 1)
       
       if (!isNaN(value) && value !== 0) {
-        // Get better context - look for financial terms around the number
+        // Get better context - look for financial terms and years around the number
         const contextWords = line.toLowerCase()
         let contextType = 'number'
         
+        // Extract year information
+        const yearMatch = contextWords.match(/20(2[0-9]|1[0-9])/)
+        const year = yearMatch ? yearMatch[0] : ''
+        
         if (contextWords.includes('revenue') || contextWords.includes('sales') || contextWords.includes('income')) {
-          contextType = 'revenue'
+          contextType = year ? `${year}_revenue` : 'revenue'
         } else if (contextWords.includes('expense') || contextWords.includes('cost') || contextWords.includes('expenditure')) {
-          contextType = 'expense'
+          contextType = year ? `${year}_expense` : 'expense'
         } else if (contextWords.includes('profit') || contextWords.includes('net') || contextWords.includes('earnings')) {
-          contextType = 'profit'
+          contextType = year ? `${year}_profit` : 'profit'
         } else if (contextWords.includes('total') || contextWords.includes('sum')) {
-          contextType = 'total'
-        } else if (contextWords.includes('asset') || contextWords.includes('liability')) {
-          contextType = 'balance_sheet'
+          contextType = year ? `${year}_total` : 'total'
+        } else if (contextWords.includes('asset')) {
+          contextType = year ? `${year}_asset` : 'asset'
+        } else if (contextWords.includes('liability')) {
+          contextType = year ? `${year}_liability` : 'liability'
+        } else if (year) {
+          contextType = `${year}_figure`
         }
         
         numericalData.push({
@@ -181,20 +189,28 @@ function extractNumericalData(text: string, tables: Array<{ headers: string[]; r
             const header = table.headers[cellIndex] || `Column ${cellIndex + 1}`
             const rowLabel = table.rows[rowIndex][0] || `Row ${rowIndex + 1}`
             
-            // Determine context type from header and row label
+            // Determine context type from header and row label with year information
             let contextType = 'table_value'
             const combinedContext = `${header} ${rowLabel}`.toLowerCase()
             
+            // Extract year information from header or row label
+            const yearMatch = combinedContext.match(/20(2[0-9]|1[0-9])/)
+            const year = yearMatch ? yearMatch[0] : ''
+            
             if (combinedContext.includes('revenue') || combinedContext.includes('sales') || combinedContext.includes('income')) {
-              contextType = 'revenue'
+              contextType = year ? `${year}_revenue` : 'revenue'
             } else if (combinedContext.includes('expense') || combinedContext.includes('cost')) {
-              contextType = 'expense'
+              contextType = year ? `${year}_expense` : 'expense'
             } else if (combinedContext.includes('profit') || combinedContext.includes('net') || combinedContext.includes('earnings')) {
-              contextType = 'profit'
+              contextType = year ? `${year}_profit` : 'profit'
             } else if (combinedContext.includes('total') || combinedContext.includes('sum')) {
-              contextType = 'total'
-            } else if (combinedContext.includes('2024') || combinedContext.includes('2023') || combinedContext.includes('2022')) {
-              contextType = 'yearly_figure'
+              contextType = year ? `${year}_total` : 'total'
+            } else if (combinedContext.includes('asset')) {
+              contextType = year ? `${year}_asset` : 'asset'
+            } else if (combinedContext.includes('liability')) {
+              contextType = year ? `${year}_liability` : 'liability'
+            } else if (year) {
+              contextType = `${year}_figure`
             }
             
             numericalData.push({
@@ -354,52 +370,150 @@ export async function performCrossDocumentValidation(
       return []
     }
 
-    // Group numerical data by context type for better comparison
-    const groupedData = documents.map(doc => {
-      const grouped = {
+    // Create a more sophisticated matching system for cross-document validation
+    const inconsistencies: any[] = []
+    
+    // Extract key financial metrics and years from each document
+    const documentMetrics = documents.map(doc => {
+      const metrics = new Map<string, Array<{ value: number; location: string }>>()
+      
+      doc.numericalData.forEach(item => {
+        const context = item.context.toLowerCase()
+        
+        // Extract year information
+        const yearMatch = context.match(/20(2[0-9]|1[0-9])/)
+        const year = yearMatch ? yearMatch[0] : null
+        
+        // Extract metric type
+        let metricType = 'unknown'
+        if (context.includes('revenue') || context.includes('sales') || context.includes('income')) {
+          metricType = 'revenue'
+        } else if (context.includes('profit') || context.includes('net') || context.includes('earnings')) {
+          metricType = 'profit'
+        } else if (context.includes('expense') || context.includes('cost')) {
+          metricType = 'expense'
+        } else if (context.includes('total')) {
+          metricType = 'total'
+        } else if (context.includes('asset')) {
+          metricType = 'asset'
+        } else if (context.includes('liability')) {
+          metricType = 'liability'
+        }
+        
+        // Create keys for comparison
+        const keys = []
+        if (year && metricType !== 'unknown') {
+          keys.push(`${year}_${metricType}`)
+        }
+        if (year) {
+          keys.push(`${year}_any`)
+        }
+        if (metricType !== 'unknown') {
+          keys.push(`any_${metricType}`)
+        }
+        
+        // Also look for exact context matches
+        keys.push(context.replace(/[^a-z0-9\s]/g, '').trim())
+        
+        keys.forEach(key => {
+          if (!metrics.has(key)) {
+            metrics.set(key, [])
+          }
+          metrics.get(key)!.push({ value: item.value, location: item.location })
+        })
+      })
+      
+      return {
         documentName: doc.name,
-        revenue: doc.numericalData.filter(item => item.context.includes('revenue')),
-        profit: doc.numericalData.filter(item => item.context.includes('profit')),
-        expense: doc.numericalData.filter(item => item.context.includes('expense')),
-        yearly_2024: doc.numericalData.filter(item => item.context.includes('2024')),
-        yearly_2023: doc.numericalData.filter(item => item.context.includes('2023')),
-        totals: doc.numericalData.filter(item => item.context.includes('total')),
-        all: doc.numericalData
+        documentId: doc.id,
+        metrics
       }
-      return grouped
     })
-
+    
+    // Find inconsistencies by comparing metrics across documents
+    const allKeys = new Set<string>()
+    documentMetrics.forEach(doc => {
+      doc.metrics.forEach((_, key) => allKeys.add(key))
+    })
+    
+    allKeys.forEach(key => {
+      const documentsWithKey = documentMetrics.filter(doc => doc.metrics.has(key))
+      
+      if (documentsWithKey.length >= 2) {
+        // Compare values for this key across documents
+        const allValues: Array<{ documentName: string; value: number; location: string }> = []
+        
+        documentsWithKey.forEach(doc => {
+          const values = doc.metrics.get(key)!
+          values.forEach(v => {
+            allValues.push({
+              documentName: doc.documentName,
+              value: v.value,
+              location: v.location
+            })
+          })
+        })
+        
+        // Check if all values are the same
+        const uniqueValues = [...new Set(allValues.map(v => v.value))]
+        
+        if (uniqueValues.length > 1) {
+          // Found inconsistency
+          const fieldName = key.includes('_') ? 
+            key.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase()) : 
+            key.charAt(0).toUpperCase() + key.slice(1)
+          
+          inconsistencies.push({
+            id: `cross-${key}-${Date.now()}`,
+            fieldName: fieldName,
+            validationType: 'cross_reference',
+            isConsistent: false,
+            errorMessage: `Different values found for "${fieldName}" across documents. Expected all documents to have the same value.`,
+            values: allValues
+          })
+        }
+      }
+    })
+    
+    // Also use AI for more sophisticated analysis
     const documentsString = documents.map(doc => 
-      `Document: ${doc.name} (ID: ${doc.id})\n` +
+      `Document: ${doc.name}\n` +
       doc.numericalData.map(item => 
-        `  Value: ${item.value.toLocaleString()}, Context: ${item.context}, Location: ${item.location}`
+        `  ${item.value.toLocaleString()} | ${item.context} | ${item.location}`
       ).join('\n')
     ).join('\n\n')
     
     const { object } = await blink.ai.generateObject({
-      prompt: `You are analyzing numerical data from multiple business documents to find inconsistencies. Focus on EXACT NUMBER MATCHING, not formatting differences.
+      prompt: `You are analyzing numerical data from multiple business documents to find EXACT VALUE INCONSISTENCIES. Focus ONLY on finding the same financial metrics with different numerical values.
 
 ${documentsString}
 
-CRITICAL INSTRUCTIONS:
-1. Look for the SAME financial metrics that appear in multiple documents with DIFFERENT VALUES
-2. Focus on yearly figures (2024, 2023) that should match exactly between documents
-3. Compare revenue, profit, expense figures that reference the same time period
-4. Ignore formatting differences - focus only on the actual numerical values
-5. For each inconsistency, provide the EXACT numbers that differ
+CRITICAL TASK:
+Find financial metrics that should be identical across documents but have different values.
 
-Examples of what to find:
-- If Excel shows "2024 Revenue: 150,000" and PDF shows "2024 Revenue: 145,000" → INCONSISTENCY
-- If one document shows "Net Profit 2023: 50,000" and another shows "Net Profit 2023: 52,000" → INCONSISTENCY
-- If totals don't match: Excel total 100,000 vs PDF total 98,000 → INCONSISTENCY
+SPECIFIC FOCUS AREAS:
+1. Yearly figures (2025, 2024, 2023, etc.) - same year should have same values
+2. Revenue/Sales figures for same periods
+3. Profit/Net Income for same periods  
+4. Total amounts that should match
+5. Any financial metric that appears in multiple documents with different values
 
-For each inconsistency found:
-- Clearly state what metric is inconsistent (e.g., "2024 Revenue", "2023 Net Profit")
-- Show the exact different values found
-- Identify which documents contain each value
-- Provide specific locations
+EXAMPLE INCONSISTENCIES TO FIND:
+- Excel: "2025 Revenue: 150,000" vs PDF: "2025 Revenue: 145,000" 
+- Excel: "Net Profit 2024: 50,000" vs PDF: "Net Profit 2024: 52,000"
+- Excel: "Total Assets: 100,000" vs PDF: "Total Assets: 98,000"
 
-ONLY report actual numerical differences, not formatting or presentation differences.`,
+FOR EACH INCONSISTENCY:
+- fieldName: Clear description (e.g., "2025 Revenue", "2024 Net Profit")
+- errorMessage: Explain what differs
+- values: List each document's value with exact numbers
+
+IGNORE:
+- Formatting differences (commas, currency symbols)
+- Different metrics (revenue vs expenses is not inconsistent)
+- Single document values (need at least 2 documents with same metric)
+
+ONLY report when the SAME metric has DIFFERENT numerical values across documents.`,
       schema: {
         type: 'object',
         properties: {
@@ -433,7 +547,19 @@ ONLY report actual numerical differences, not formatting or presentation differe
       }
     })
     
-    return object.crossValidations || []
+    // Combine rule-based and AI-based results, removing duplicates
+    const aiResults = object.crossValidations || []
+    const allResults = [...inconsistencies, ...aiResults]
+    
+    // Remove duplicates based on fieldName and similar values
+    const uniqueResults = allResults.filter((result, index, array) => {
+      return index === array.findIndex(r => 
+        r.fieldName === result.fieldName && 
+        JSON.stringify(r.values.map(v => v.value).sort()) === JSON.stringify(result.values.map(v => v.value).sort())
+      )
+    })
+    
+    return uniqueResults
   } catch (error) {
     console.error('Error in cross-document validation:', error)
     return []
